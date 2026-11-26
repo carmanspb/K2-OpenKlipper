@@ -1,6 +1,73 @@
 #include "screen.h"
 #include <stdlib.h>
 #include <string.h>
+/* Patches replace whole top-level sections. Null is a value, not a deletion;
+ * explicit removals keep reconnects and cleared data unambiguous. */
+const cJSON *json_update_value(const cJSON *previous, const cJSON *update, const char *path) {
+    if (!jbool(update, "_screen_patch", false))
+        return jget(update, path);
+    size_t length = strcspn(path, ".");
+    const cJSON *item;
+    cJSON_ArrayForEach(item, jget(update, "remove"))
+        if (cJSON_IsString(item) && strlen(item->valuestring) == length &&
+            !strncmp(path, item->valuestring, length))
+            return NULL;
+    const cJSON *changes = jget(update, "set");
+    cJSON_ArrayForEach(item, changes)
+        if (item->string && strlen(item->string) == length && !strncmp(path, item->string, length))
+            return jget(changes, path);
+    return jget(previous, path);
+}
+
+cJSON *json_update(cJSON *previous, cJSON *update) {
+    if (!jbool(update, "_screen_patch", false)) {
+        cJSON_Delete(previous);
+        return update;
+    }
+    cJSON *changes = jget(update, "set"), *item;
+    while (changes && changes->child) {
+        item = cJSON_DetachItemViaPointer(changes, changes->child);
+        cJSON *existing = cJSON_GetObjectItemCaseSensitive(previous, item->string);
+        if (existing)
+            cJSON_ReplaceItemViaPointer(previous, existing, item);
+        else {
+            char *key = strdup(item->string);
+            if (key) {
+                cJSON_AddItemToObject(previous, key, item);
+                free(key);
+            } else
+                cJSON_Delete(item);
+        }
+    }
+    cJSON_ArrayForEach(item, jget(update, "remove"))
+        if (cJSON_IsString(item))
+            cJSON_DeleteItemFromObjectCaseSensitive(previous, item->valuestring);
+    cJSON_Delete(update);
+    return previous;
+}
+
+/* Fast path for stable snapshot key order; no copied trees or JSON strings.
+ * A producer may reorder object keys, so retain order-independent equality as
+ * a fallback. Arrays remain ordered, and missing values differ from null. */
+bool json_equal(const cJSON *left, const cJSON *right) {
+    if (left == right)
+        return true;
+    if (!left || !right)
+        return false;
+    bool object = cJSON_IsObject(left) && cJSON_IsObject(right);
+    bool array = cJSON_IsArray(left) && cJSON_IsArray(right);
+    if (!object && !array)
+        return cJSON_Compare(left, right, true);
+    const cJSON *a = left->child, *b = right->child;
+    for (; a && b; a = a->next, b = b->next) {
+        if (object && strcmp(a->string, b->string))
+            return cJSON_Compare(left, right, true);
+        if (!json_equal(a, b))
+            return false;
+    }
+    return !a && !b;
+}
+
 cJSON *jget(const cJSON *object, const char *path) {
     char key[160];
     const char *p = path;

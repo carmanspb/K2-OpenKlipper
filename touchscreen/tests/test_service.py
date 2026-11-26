@@ -802,5 +802,46 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(snap["heaters"], [])
 
 
+    def test_stream_negotiation_keeps_legacy_clients_and_reconnect_baselines(self):
+        import json
+        import socket
+        import threading
+
+        def connection(patches):
+            server, client = socket.socketpair()
+            client.settimeout(3)
+            thread = threading.Thread(target=self.s.client, args=(server,), daemon=True)
+            thread.start()
+            reader = client.makefile("rb")
+            try:
+                baseline = json.loads(reader.readline())
+                self.assertIn("settings", baseline)
+                self.assertNotIn("_screen_patch", baseline)
+                if patches:
+                    client.sendall(b'{"action":"activity","stream_protocol":2}\n')
+                with self.s.lock:
+                    self.s.sequence += 1
+                    self.s.status["extruder"] = {
+                        "temperature": self.s.status.get("extruder", {}).get("temperature", 20) + 1
+                    }
+                update = json.loads(reader.readline())
+                if patches:
+                    self.assertTrue(update["_screen_patch"])
+                    self.assertNotIn("settings", update["set"])
+                    self.assertIn("status", update["set"])
+                else:
+                    self.assertIn("settings", update)
+                    self.assertNotIn("_screen_patch", update)
+            finally:
+                reader.close()
+                client.close()
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
+
+        connection(False)
+        connection(True)
+        connection(True)
+
+
 if __name__ == "__main__":
     unittest.main()

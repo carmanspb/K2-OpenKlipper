@@ -334,7 +334,8 @@ static bool connect_ipc(void) {
         return false;
     }
     fcntl(ipc, F_SETFL, O_NONBLOCK);
-    return true;
+    /* Older backends accept activity and ignore the additional field. */
+    return platform_send("{\"action\":\"activity\",\"stream_protocol\":2}");
 }
 bool platform_send(const char *text) {
     if (!connect_ipc())
@@ -389,16 +390,11 @@ char *platform_receive(void) {
     }
     if (!receive_buffer)
         return NULL;
-    char *last = NULL, *p = receive_buffer;
-    while ((p = memchr(p, '\n', receive_length - (size_t)(p - receive_buffer)))) {
-        last = p;
-        p++;
-    }
+    /* Updates are ordered: never discard intermediate patches. */
+    char *last = memchr(receive_buffer, '\n', receive_length);
     if (!last)
         return NULL;
-    char *start = last;
-    while (start > receive_buffer && start[-1] != '\n')
-        start--;
+    char *start = receive_buffer;
     char *result = strndup(start, last - start);
     size_t consumed = (size_t)(last - receive_buffer) + 1;
     memmove(receive_buffer, receive_buffer + consumed, receive_length - consumed);

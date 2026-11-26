@@ -16,6 +16,21 @@ checks current state and configuration, reserves the resources needed for the
 action, and calls Moonraker/Klipper or printer-local platform services. Motion,
 heating and CFS loading sequences belong to the firmware, not the UI.
 
+The service subscribes to Moonraker status and also performs bounded background
+refreshes. Screen IPC starts with a full snapshot. An updated renderer requests
+protocol 2 on its initial activity message, then receives only changed top-level
+sections and explicit deletions. Unchanged sections stay in renderer memory.
+Every reconnect starts with another full snapshot; queued updates are consumed
+in order. Older clients continue to receive full snapshots. Errors, operation
+state and safety availability are transmitted regardless of the visible page.
+
+`backend/snapshot_codec.py` caches section encoding. Configuration, materials and
+time-zone lists use immutable references: replace these objects when refreshing
+them rather than changing them in place. Other sections are checked against
+independent copies. The renderer compares view inputs without serializing them,
+and updates labels only when their displayed text changes. Keep these paths
+allocation-light; do not introduce page-wide redraws for unrelated telemetry.
+
 `backend/storage.py:prepare_image()` uses **Pillow** to decode, crop,
 resize and cache images in a backend worker. LVGL renders the controls, text and
 frames; Pillow is not the screen renderer. Install Pillow for backend development
@@ -34,6 +49,7 @@ Paths below are relative to `touchscreen/`:
 | `src/mesh.c` | Shaded bed mesh, touch rotation, statistics and profile controls |
 | `src/view_inputs.c` | State dependencies for efficient live updates |
 | `src/json.c`, `src/screen.h` | JSON helpers, UI state and layout constants |
+| `backend/snapshot_codec.py` | Cached full snapshots and negotiated section updates |
 | `backend/service.py` | Moonraker integration, requests, operations and thumbnails |
 | `backend/action_policy.py` | Action availability and resource ownership |
 | `backend/model.py` | Printer capabilities, limits and filament compatibility |

@@ -33,6 +33,7 @@ from pathlib import Path
 import action_policy
 import gcode_metadata
 import model
+from snapshot_codec import SnapshotEncoder
 import platform_services as platform
 import storage
 
@@ -1473,7 +1474,7 @@ class Service:
                 self.status_times.clear()
                 self.status.clear()
                 if remote_reboot or reset_clock:
-                    self.settings.clear()
+                    self.settings = {}
                 self.settings_refresh_needed = True
                 self.requested_values.clear()
                 self.pending_temperatures.clear()
@@ -2058,6 +2059,8 @@ class Service:
         buffer = b""
         previous = ""
         last_warning = 0.0
+        encoder = SnapshotEncoder()
+        patches = False
         try:
             while True:
                 readable, _, _ = select.select([connection], [], [], 0.2)
@@ -2071,7 +2074,10 @@ class Service:
                     while b"\n" in buffer:
                         line, buffer = buffer.split(b"\n", 1)
                         try:
-                            self.submit(json.loads(line))
+                            request = json.loads(line)
+                            if request.get("action") == "activity" and request.get("stream_protocol") == 2:
+                                patches = True
+                            self.submit(request)
                         except action_policy.ActionBusy:
                             # A rapid second tap is rejected, not queued or
                             # promoted into a modal printer error.
@@ -2083,12 +2089,18 @@ class Service:
                 with self.lock:
                     lock_wait = time.monotonic() - started
                     value = self.snapshot()
-                snapshot_at = time.monotonic()
+                    snapshot_at = time.monotonic()
+                    # These sections are replaced, never edited in place.
+                    # New renderers receive changed sections; older clients
+                    # retain complete snapshots with cached JSON encoding.
+                    encoded = encoder.encode(
+                        value, patches=patches,
+                        immutable=("settings", "materials", "zones", "timezone_presets"),
+                    )
                 # Suppress identical snapshots. The 200 ms idle wait bounds
                 # routine traffic; incoming commands still wake select immediately.
-                encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
                 encoded_at = time.monotonic()
-                if encoded != previous:
+                if encoded is not None and encoded != previous:
                     connection.sendall(encoded.encode() + b"\n")
                     previous = encoded
                 elapsed = time.monotonic() - started
@@ -2102,7 +2114,7 @@ class Service:
                             snapshot_at - started,
                             encoded_at - snapshot_at,
                             time.monotonic() - encoded_at,
-                            len(encoded),
+                            len(encoded or ""),
                         ),
                         flush=True,
                     )
