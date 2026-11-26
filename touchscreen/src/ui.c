@@ -108,7 +108,8 @@ static ConnectionMode connection_state(void) {
     const char *state = S("status.webhooks.state");
     bool complete = app.connected && !strcmp(state, "ready") &&
                     cJSON_GetArraySize(J("settings")) > 0 && cJSON_GetArraySize(J("heaters")) > 0;
-    if (complete && (app.ever_ready || !cJSON_IsObject(J("status.k2_motor_bus")) ||
+    if (complete && ((!app.restart_waiting && app.ever_ready) ||
+                     !cJSON_IsObject(J("status.k2_motor_bus")) ||
                      B("status.k2_motor_bus.motors_ready")))
         return CONNECTION_READY;
     return app.ever_ready || !strcmp(state, "error") || !strcmp(state, "shutdown")
