@@ -334,8 +334,7 @@ static bool connect_ipc(void) {
         return false;
     }
     fcntl(ipc, F_SETFL, O_NONBLOCK);
-    /* Older backends accept activity and ignore the additional field. */
-    return platform_send("{\"action\":\"activity\",\"stream_protocol\":2}");
+    return true;
 }
 bool platform_send(const char *text) {
     if (!connect_ipc())

@@ -11,7 +11,7 @@ import snapshot_codec
 
 class SnapshotCodecTests(unittest.TestCase):
     def test_cached_fields_are_not_reencoded_for_temperature_updates(self):
-        encoder = snapshot_codec.SnapshotEncoder()
+        encoder = snapshot_codec.SectionEncoder()
         config = {'extruder': {'max_temp': 350}, 'macro': {'gcode': 'G1 X10'}}
         library = [{'type': 'PLA', 'name': 'Example'}]
         value = {'settings': config, 'status': {'extruder': {'temperature': 20},
@@ -27,7 +27,7 @@ class SnapshotCodecTests(unittest.TestCase):
             self.assertIs(encoder.encode(value), unchanged)
 
     def test_in_place_mutation_deletions_nulls_and_reconnection(self):
-        encoder = snapshot_codec.SnapshotEncoder()
+        encoder = snapshot_codec.SectionEncoder()
         value = {'settings': {'limit': 350}, 'files': ['a'], 'status': {'fan': {'speed': 0}}, 'result': None}
         encoder.encode(value)
         value['settings']['limit'] = 280
@@ -42,10 +42,10 @@ class SnapshotCodecTests(unittest.TestCase):
         self.assertEqual(json.loads(encoder.encode(value)), value)
         value['status'] = None
         self.assertEqual(json.loads(encoder.encode(value)), value)
-        self.assertEqual(json.loads(snapshot_codec.SnapshotEncoder().encode(value)), value)
+        self.assertEqual(json.loads(snapshot_codec.SectionEncoder().encode(value)), value)
 
     def test_failed_encoding_can_be_retried(self):
-        encoder = snapshot_codec.SnapshotEncoder()
+        encoder = snapshot_codec.SectionEncoder()
         encoder.encode({'value': 1})
         with self.assertRaises(TypeError):
             encoder.encode({'value': object()})
@@ -56,31 +56,30 @@ if __name__ == '__main__':
     unittest.main()
 
 class SnapshotPatchTests(unittest.TestCase):
-    def test_patch_round_trip_removal_null_and_legacy_fallback(self):
+    def test_patch_round_trip_removal_null_and_reconnect(self):
         encoder = snapshot_codec.SnapshotEncoder()
         state = {'session': 'first', 'settings': {'limit': 350}, 'status': {'fan': {'speed': 0}}, 'result': 1}
-        assembled = json.loads(encoder.encode(state, patches=True))
+        assembled = json.loads(encoder.encode(state))
         state['status']['fan']['speed'] = .5
         state['result'] = None
         del state['settings']
-        update = json.loads(encoder.encode(state, patches=True))
+        update = json.loads(encoder.encode(state))
         self.assertTrue(update['_screen_patch'])
         assembled.update(update['set'])
         for key in update['remove']:
             assembled.pop(key, None)
         self.assertEqual(assembled, state)
-        self.assertIsNone(encoder.encode(state, patches=True))
-        self.assertEqual(json.loads(encoder.encode(state)), state)
-        self.assertFalse(json.loads(snapshot_codec.SnapshotEncoder().encode(state, patches=True)).get('_screen_patch', False))
+        self.assertIsNone(encoder.encode(state))
+        self.assertFalse(json.loads(snapshot_codec.SnapshotEncoder().encode(state)).get('_screen_patch', False))
 
     def test_boolean_type_changes_are_not_suppressed(self):
         encoder = snapshot_codec.SnapshotEncoder()
         encoder.encode({'value': {'enabled': True}})
-        result = json.loads(encoder.encode({'value': {'enabled': 1}}, patches=True))
+        result = json.loads(encoder.encode({'value': {'enabled': 1}}))
         self.assertIs(type(result['set']['value']['enabled']), int)
 
     def test_immutable_sections_are_reused_but_replacements_are_checked(self):
-        encoder = snapshot_codec.SnapshotEncoder()
+        encoder = snapshot_codec.SectionEncoder()
         value = {'settings': {'limit': 350}}
         encoder.encode(value, immutable=('settings',))
         with mock.patch.object(snapshot_codec, 'same_value', side_effect=AssertionError('Compared immutable section')):

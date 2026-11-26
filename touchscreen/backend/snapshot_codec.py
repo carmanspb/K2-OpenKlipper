@@ -1,4 +1,4 @@
-"""Cache JSON sections and optionally stream changes to updated renderers.
+"""Cache JSON sections and stream changes between the paired screen components.
 
 One encoder belongs to one client. Retained values are independent copies so
 in-place state changes cannot silently reuse stale JSON. Printer status is split
@@ -29,7 +29,7 @@ def same_value(left, right):
     return left == right
 
 
-class SnapshotEncoder:
+class SectionEncoder:
     def __init__(self, split_status=True):
         self.split_status = split_status
         self.values = {}
@@ -37,10 +37,9 @@ class SnapshotEncoder:
         self.status = None
         self.output = ""
         self.full_dirty = True
-        self.sent = False
         self.references = {}
 
-    def encode(self, value, patches=False, immutable=()):
+    def encode(self, value, immutable=()):
         changed = set()
         removed = self.encoded.keys() - value.keys()
         for key in removed:
@@ -55,7 +54,7 @@ class SnapshotEncoder:
             if self.split_status and key == "status" and isinstance(item, dict):
                 self.values.pop(key, None)
                 if self.status is None:
-                    self.status = SnapshotEncoder(split_status=False)
+                    self.status = SectionEncoder(split_status=False)
                 encoded = self.status.encode(item)
                 if self.encoded.get(key) != encoded:
                     self.encoded[key] = encoded
@@ -69,24 +68,37 @@ class SnapshotEncoder:
                 changed.add(key)
             if key in immutable:
                 self.references[key] = item
+        self.changed, self.removed = changed, removed
         self.full_dirty |= bool(changed or removed)
-        if patches and self.sent:
-            if not changed and not removed:
-                return None
-            updates = ",".join(
-                compact_json(key) + ":" + self.encoded[key]
-                for key in value if key in changed
-            )
-            return (
-                '{"_screen_patch":true,"session":'
-                + self.encoded.get("session", "null")
-                + ',"set":{' + updates + '},"remove":'
-                + compact_json(sorted(removed)) + '}'
-            )
         if self.full_dirty:
             self.output = "{" + ",".join(
                 compact_json(key) + ":" + self.encoded[key] for key in value
             ) + "}"
             self.full_dirty = False
-        self.sent = True
         return self.output
+
+
+class SnapshotEncoder(SectionEncoder):
+    """Each connection starts with a baseline, then receives ordered changes."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent = False
+
+    def encode(self, value, immutable=()):
+        full = super().encode(value, immutable=immutable)
+        if not self.sent:
+            self.sent = True
+            return full
+        if not self.changed and not self.removed:
+            return None
+        updates = ",".join(
+            compact_json(key) + ":" + self.encoded[key]
+            for key in value if key in self.changed
+        )
+        return (
+            '{"_screen_patch":true,"session":'
+            + self.encoded.get("session", "null")
+            + ',"set":{' + updates + '},"remove":'
+            + compact_json(sorted(self.removed)) + '}'
+        )

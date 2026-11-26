@@ -2060,7 +2060,6 @@ class Service:
         previous = ""
         last_warning = 0.0
         encoder = SnapshotEncoder()
-        patches = False
         try:
             while True:
                 readable, _, _ = select.select([connection], [], [], 0.2)
@@ -2075,8 +2074,6 @@ class Service:
                         line, buffer = buffer.split(b"\n", 1)
                         try:
                             request = json.loads(line)
-                            if request.get("action") == "activity" and request.get("stream_protocol") == 2:
-                                patches = True
                             self.submit(request)
                         except action_policy.ActionBusy:
                             # A rapid second tap is rejected, not queued or
@@ -2091,10 +2088,10 @@ class Service:
                     value = self.snapshot()
                     snapshot_at = time.monotonic()
                     # These sections are replaced, never edited in place.
-                    # New renderers receive changed sections; older clients
-                    # retain complete snapshots with cached JSON encoding.
+                    # The paired renderer receives only changed sections after
+                    # the initial full state on every connection.
                     encoded = encoder.encode(
-                        value, patches=patches,
+                        value,
                         immutable=("settings", "materials", "zones", "timezone_presets"),
                     )
                 # Suppress identical snapshots. The 200 ms idle wait bounds
