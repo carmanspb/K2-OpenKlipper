@@ -16,8 +16,15 @@ checks current state and configuration, reserves the resources needed for the
 action, and calls Moonraker/Klipper or printer-local platform services. Motion,
 heating and CFS loading sequences belong to the firmware, not the UI.
 
-The service subscribes to Moonraker status and also performs bounded background
-refreshes. Screen IPC starts with a full snapshot, then sends only changed top-level
+The service receives live printer status through a Moonraker WebSocket subscription.
+Full-status HTTP polling runs only during connection setup or stream failure.
+CFS-only startup reads discover fields added during initialization, then renew the
+subscription. Entering the Filament tab performs one CFS read; while idle and
+that tab remains visible, CFS reads repeat every three seconds. They stop during
+printing/pausing or when the renderer leaves/disconnects. Newly discovered fields
+renew the subscription without resetting the printer session. No CFS reads are
+made when the driver reports that none is fitted. Configuration and platform
+refreshes remain separate background tasks. Screen IPC starts with a full snapshot, then sends only changed top-level
 sections and explicit deletions. Unchanged sections stay in renderer memory.
 Every reconnect starts with another full snapshot; queued updates are consumed
 in order. The renderer and backend are installed together as one versioned unit.

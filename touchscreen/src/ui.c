@@ -716,6 +716,19 @@ static void number_validate(void) {
     }
 }
 
+static void report_visible_page(void) {
+    if (!app.fixture && app.service_link) {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "action", "view");
+        cJSON_AddStringToObject(r, "page", app.route);
+        char *raw = cJSON_PrintUnformatted(r);
+        cJSON_Delete(r);
+        if (!platform_send(raw))
+            ui_transport_lost();
+        free(raw);
+    }
+}
+
 void ui_route(const char *route, bool back) {
     bool editing = !strcmp(app.route, "edit") || !strcmp(app.route, "materials") ||
                    !strcmp(app.route, "colors");
@@ -743,6 +756,7 @@ void ui_route(const char *route, bool back) {
     bool enter_files = !back && !strcmp(route, "files") && strcmp(app.route, "files") &&
                        strcmp(app.route, "file") && strncmp(app.route, "mapping", 7);
     snprintf(app.route, sizeof(app.route), "%s", route);
+    report_visible_page();
     if (!strcmp(route, "materials"))
         ui_catalogue_load();
     if (enter_files) {
@@ -929,6 +943,8 @@ void ui_data(cJSON *data) {
     }
     app.connected = B("connected");
     app.service_link = true;
+    if (!previous_link || !patch)
+        report_visible_page();
     app.ever_service = true;
     ConnectionMode actual = connection_state();
     const char *printer_state = S("status.webhooks.state");

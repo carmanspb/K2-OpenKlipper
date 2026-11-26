@@ -277,6 +277,12 @@ class Service:
         self.usb_initialized = False
         self.connected = False
         self.stream_connected = False
+        self.subscription_refresh = threading.Event()
+        self.cfs_query_lock = threading.Lock()
+        self.cfs_initializing = True
+        self.cfs_query_at = 0.0
+        self.visible_page = ""
+        self.view_client = None
         self.status_times = {}
         self.status_epoch = 0
         self.printer_generation = 0
@@ -379,6 +385,14 @@ class Service:
 
     def submit(self, request):
         action = request.get("action")
+        if action == "view":
+            page = str(request.get("page", ""))[:48]
+            with self.lock:
+                entering = page == "filament" and self.visible_page != page
+                self.visible_page = page
+            if entering:
+                threading.Thread(target=self.refresh_cfs, daemon=True).start()
+            return
         if action == "files":
             # Browsing storage is a background read, not a printer operation.
             # Coalesce repeated navigation/refresh taps while the read is active.
@@ -1584,7 +1598,8 @@ class Service:
         elif "result" in message and "status" in message["result"]:
             result = message["result"]
             self.merge_status(
-                result["status"], result.get("eventtime"), full=True, new_epoch=True
+                result["status"], result.get("eventtime"), full=True,
+                new_epoch=message.get("id") != 2
             )
             self.stream_connected = True
         elif method in (
@@ -1607,6 +1622,9 @@ class Service:
             ws = None
             try:
                 ws = WebSocket(self.mr.base)
+                with self.lock:
+                    self.cfs_initializing = True
+                self.subscription_refresh.clear()
                 ws.send(
                     {
                         "jsonrpc": "2.0",
@@ -1619,6 +1637,16 @@ class Service:
                     }
                 )
                 while True:
+                    if self.subscription_refresh.is_set():
+                        self.subscription_refresh.clear()
+                        ws.send({
+                            "jsonrpc": "2.0", "id": 2,
+                            "method": "printer.objects.subscribe",
+                            "params": {"objects": {
+                                name: list(SLOT_FIELDS) if name == "hark_cfs_slots" else None
+                                for name in OBJECTS
+                            }},
+                        })
                     self.stream_message(ws.receive())
             except Exception as error:
                 self.stream_connected = False
@@ -1970,15 +1998,62 @@ class Service:
                 self.materials = self.filaments = materials
                 self.catalogue_revision = (self.status_epoch, data.get("revision", revision))
 
+    def cfs_fitted(self):
+        """Only query optional CFS hardware when the printer reports it fitted."""
+        cfs = self.status.get("k2_cfs", {})
+        return cfs.get("fitted") is True
+
+    def cfs_refresh_due(self, now):
+        return self.cfs_fitted() and (
+            self.cfs_initializing or (
+                self.visible_page == "filament" and not model.active(self.status)
+            )
+        ) and now - self.cfs_query_at >= 3
+
+    def refresh_cfs(self):
+        # A tab-entry read is allowed during printing; recurring reads are not.
+        # Coalesce a quick tab switch with the background startup/tab refresh.
+        if not self.cfs_query_lock.acquire(blocking=False):
+            return
+        try:
+            with self.lock:
+                if not self.cfs_fitted() or self.status.get("webhooks", {}).get("state") != "ready":
+                    return
+                epoch = self.status_epoch
+                known = {name: set(self.status.get(name, {}))
+                         for name in ("k2_cfs", "hark_cfs_slots")}
+            result = self.mr.request(
+                "/printer/objects/query?k2_cfs&hark_cfs_slots=" + ",".join(SLOT_FIELDS)
+            )
+            status = result["status"]
+            self.merge_status(status, result.get("eventtime"), epoch=epoch)
+            with self.lock:
+                if epoch != self.status_epoch:
+                    return
+                cfs = status.get("k2_cfs", {})
+                initialized = cfs.get("online") and "temperature" in cfs and "humidity" in cfs
+                new_fields = any(set(values) - known.get(name, set())
+                                 for name, values in status.items())
+                if new_fields or (self.cfs_initializing and initialized):
+                    self.subscription_refresh.set()
+                if initialized:
+                    self.cfs_initializing = False
+                self.cfs_query_at = time.monotonic()
+        except Exception as error:
+            # A failed optional read must not disconnect a healthy subscription.
+            print("screen CFS refresh: %s" % error, flush=True)
+        finally:
+            self.cfs_query_lock.release()
+
     def poll(self):
-        config_at = platform_at = alerts_at = full_at = 0
+        config_at = platform_at = alerts_at = 0
         while True:
             querying_status = False
             try:
                 now = time.monotonic()
-                if not self.stream_connected or not self.status or now - full_at >= 5:
-                    # CFS adds environment fields after its startup poll. Some
-                    # Moonraker versions subscribe only to initially known keys.
+                if not self.stream_connected or not self.status:
+                    # Full HTTP status is only a connection fallback. Healthy
+                    # subscriptions deliver updates without recurring full reads.
                     with self.lock:
                         epoch = self.status_epoch
                         baseline = max(
@@ -1994,7 +2069,10 @@ class Service:
                         clock_baseline=baseline,
                     )
                     querying_status = False
-                    full_at = now
+                with self.lock:
+                    cfs_due = self.cfs_refresh_due(now)
+                if self.stream_connected and cfs_due:
+                    self.refresh_cfs()
                 if (
                     now - config_at > 30
                     or not self.settings
@@ -2123,6 +2201,9 @@ class Service:
                         line, buffer = buffer.split(b"\n", 1)
                         try:
                             request = json.loads(line)
+                            if request.get("action") == "view":
+                                with self.lock:
+                                    self.view_client = connection
                             self.submit(request)
                         except action_policy.ActionBusy:
                             # A rapid second tap is rejected, not queued or
@@ -2169,6 +2250,10 @@ class Service:
         except (OSError, ValueError):
             pass
         finally:
+            with self.lock:
+                if self.view_client is connection:
+                    self.visible_page = ""
+                    self.view_client = None
             connection.close()
 
 
