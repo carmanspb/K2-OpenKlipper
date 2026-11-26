@@ -51,10 +51,6 @@ class SnapshotCodecTests(unittest.TestCase):
             encoder.encode({'value': object()})
         self.assertEqual(json.loads(encoder.encode({'value': 2})), {'value': 2})
 
-
-if __name__ == '__main__':
-    unittest.main()
-
 class SnapshotPatchTests(unittest.TestCase):
     def test_patch_round_trip_removal_null_and_reconnect(self):
         encoder = snapshot_codec.SnapshotEncoder()
@@ -86,3 +82,19 @@ class SnapshotPatchTests(unittest.TestCase):
             encoder.encode(value, immutable=('settings',))
         value['settings'] = {'limit': 280}
         self.assertEqual(json.loads(encoder.encode(value, immutable=('settings',))), value)
+
+
+    def test_immutable_status_only_reencodes_replaced_objects(self):
+        encoder = snapshot_codec.SnapshotEncoder(immutable_status=True)
+        library = {"library": [{"type": "PLA", "name": "Example"}]}
+        value = {"session": "test", "status": {"extruder": {"temperature": 20}, "hark_cfs_slots": library}}
+        encoder.encode(value)
+        value["status"] = dict(value["status"], extruder={"temperature": 21})
+        with mock.patch.object(snapshot_codec, "same_value", wraps=snapshot_codec.same_value) as compare:
+            update = json.loads(encoder.encode(value))
+            self.assertEqual(update["set"]["status"]["extruder"]["temperature"], 21)
+            self.assertFalse(any(c.args[1] is library for c in compare.call_args_list))
+
+
+if __name__ == '__main__':
+    unittest.main()

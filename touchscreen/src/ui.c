@@ -743,6 +743,8 @@ void ui_route(const char *route, bool back) {
     bool enter_files = !back && !strcmp(route, "files") && strcmp(app.route, "files") &&
                        strcmp(app.route, "file") && strncmp(app.route, "mapping", 7);
     snprintf(app.route, sizeof(app.route), "%s", route);
+    if (!strcmp(route, "materials"))
+        ui_catalogue_load();
     if (enter_files) {
         cJSON *r = cJSON_CreateObject();
         cJSON_AddStringToObject(r, "action", "files");
@@ -884,6 +886,7 @@ void ui_data(cJSON *data) {
         cJSON_Delete(data);
         return; /* A new connection must establish a complete baseline first. */
     }
+    ui_resources_load(data);
     static uint64_t result_ids[32];
     static unsigned result_cursor;
     ConnectionMode previous_connection = ui_connection_mode();
@@ -908,6 +911,8 @@ void ui_data(cJSON *data) {
     bool old_fitted = B("status.k2_cfs.fitted");
     app.data = json_update(app.data, data);
     data = app.data;
+    if (!strcmp(app.route, "materials") && ui_catalogue_load())
+        app.dirty = true;
     if (files_busy != B("files_refresh.busy") || wifi_busy != B("wifi.busy"))
         app.nav_dirty = true;
     if (app.file_waiting && !strcmp(S("file"), app.file) && B("file_read.busy"))

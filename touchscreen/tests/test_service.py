@@ -815,7 +815,8 @@ class ServiceTests(unittest.TestCase):
             reader = client.makefile("rb")
             try:
                 baseline = json.loads(reader.readline())
-                self.assertIn("settings", baseline)
+                self.assertNotIn("settings", baseline)
+                self.assertIn("resources", baseline)
                 self.assertNotIn("_screen_patch", baseline)
                 with self.s.lock:
                     self.s.sequence += 1
@@ -835,6 +836,43 @@ class ServiceTests(unittest.TestCase):
         connection()
         connection()
         connection()
+
+
+    def test_status_objects_remain_immutable_across_deltas_and_presented_targets(self):
+        self.s.status["extruder"] = {"temperature": 29, "target": 0}
+        before = self.s.snapshot()
+        original = before["status"]["extruder"]
+        self.s.merge_status({"extruder": {"temperature": 30}}, 20)
+        after = self.s.snapshot()
+        self.assertEqual(original, {"temperature": 29, "target": 0})
+        self.assertEqual(after["status"]["extruder"]["temperature"], 30)
+        self.assertIs(before["status"]["hark_cfs_slots"], after["status"]["hark_cfs_slots"])
+        self.s.requested_values[("temperature", "extruder")] = (180, time.monotonic() + 8)
+        presented = self.s.snapshot()
+        self.assertEqual(presented["status"]["extruder"]["target"], 180)
+        self.assertEqual(self.s.status["extruder"]["target"], 0)
+        self.assertEqual(after["status"]["extruder"]["target"], 0)
+
+
+    def test_catalogue_is_separate_and_refreshed_only_for_source_revisions(self):
+        import json
+        self.s.status["hark_cfs_slots"]["revision"] = 1
+        self.mr.request.return_value = {"status": {"hark_cfs_slots": {
+            "revision": 1, "materials": [{"name": "PLA"}], "library": []}}}
+        self.s.refresh_catalogue()
+        descriptor = self.s.catalogue.descriptor
+        self.assertEqual(json.loads(Path(descriptor["path"]).read_text()), [{"name": "PLA"}])
+        self.s.refresh_catalogue()
+        self.assertEqual(self.mr.request.call_count, 1)
+        self.s.merge_status({"hark_cfs_slots": {"revision": 2,
+                            "materials": [{"name": "not live"}]}}, 21)
+        self.assertNotIn("materials", self.s.status["hark_cfs_slots"])
+        self.mr.request.return_value = {"status": {"hark_cfs_slots": {
+            "revision": 2, "materials": [{"name": "PETG"}], "library": []}}}
+        self.s.refresh_catalogue()
+        self.assertEqual(self.mr.request.call_count, 2)
+        self.assertNotEqual(descriptor["revision"], self.s.catalogue.descriptor["revision"])
+        self.assertEqual(self.s.materials, [{"name": "PETG"}])
 
 
 if __name__ == "__main__":

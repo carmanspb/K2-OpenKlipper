@@ -39,6 +39,7 @@ typedef struct {
     char assets[1024], socket[108], selected_slot[16], cfs_unit[16], file[1024], mapping_file[1024];
     char timezone_draft[128];
     char filter[20], number_text[32], number_title[100], number_kind[24], number_key[64];
+    char catalogue_revision[65];
     char confirm[16384], confirm_message[1024], pending_route[48], keyboard_kind[24];
     char keyboard_value[128], keyboard_title[100], mapping_tool[16];
     cJSON *draft, *mapping;
@@ -112,6 +113,8 @@ bool ui_view_changed(const cJSON *previous, const cJSON *current);
 bool json_equal(const cJSON *left, const cJSON *right);
 const cJSON *json_update_value(const cJSON *previous, const cJSON *update, const char *path);
 cJSON *json_update(cJSON *previous, cJSON *update);
+void ui_resources_load(cJSON *update);
+bool ui_catalogue_load(void);
 bool ui_section_root(void);
 void ui_header(const char *);
 void modal_message(const char *);

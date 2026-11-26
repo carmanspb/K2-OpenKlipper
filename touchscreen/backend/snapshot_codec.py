@@ -30,8 +30,9 @@ def same_value(left, right):
 
 
 class SectionEncoder:
-    def __init__(self, split_status=True):
+    def __init__(self, split_status=True, immutable_status=False):
         self.split_status = split_status
+        self.immutable_status = immutable_status
         self.values = {}
         self.encoded = {}
         self.status = None
@@ -55,7 +56,9 @@ class SectionEncoder:
                 self.values.pop(key, None)
                 if self.status is None:
                     self.status = SectionEncoder(split_status=False)
-                encoded = self.status.encode(item)
+                encoded = self.status.encode(
+                    item, immutable=item.keys() if self.immutable_status else ()
+                )
                 if self.encoded.get(key) != encoded:
                     self.encoded[key] = encoded
                     changed.add(key)
@@ -81,8 +84,8 @@ class SectionEncoder:
 class SnapshotEncoder(SectionEncoder):
     """Each connection starts with a baseline, then receives ordered changes."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, immutable_status=False):
+        super().__init__(immutable_status=immutable_status)
         self.sent = False
 
     def encode(self, value, immutable=()):

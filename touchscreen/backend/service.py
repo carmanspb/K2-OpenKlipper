@@ -34,6 +34,7 @@ import action_policy
 import gcode_metadata
 import model
 from snapshot_codec import SnapshotEncoder
+from static_resources import ResourceFile
 import platform_services as platform
 import storage
 
@@ -72,6 +73,13 @@ OBJECTS = (
     "k2_motor_bus",
 )
 
+# The catalogue is queried separately when its revision changes. Do not repeat
+# it in live status queries, subscriptions, comparisons or screen updates.
+SLOT_FIELDS = (
+    "slots", "revision", "tool_map", "tool_map_set", "tool_map_file",
+    "tool_map_external", "map_tools", "map_targets",
+)
+
 
 class Moonraker:
     def __init__(self, base):
@@ -95,7 +103,11 @@ class Moonraker:
     def status_snapshot(self):
         return self.request(
             "/printer/objects/query?"
-            + "&".join(urllib.parse.quote(name) for name in OBJECTS)
+            + "&".join(
+                urllib.parse.quote(name)
+                + ("=" + ",".join(SLOT_FIELDS) if name == "hark_cfs_slots" else "")
+                for name in OBJECTS
+            )
         )
 
     def query(self):
@@ -288,6 +300,10 @@ class Service:
         self.asleep = False
         self.power_lock = threading.Lock()
         self.cache_path = self.config_path.parent / "native-screen-cache"
+        self.resources = ResourceFile(self.cache_path / "screen-resources.json")
+        self.catalogue = ResourceFile(self.cache_path / "material-catalogue.json")
+        self.catalogue_revision = None
+        self.catalogue_lock = threading.Lock()
         self.print_file = ""
         self.artwork_key = None
 
@@ -342,10 +358,9 @@ class Service:
                 clock_baseline=baseline,
             ):
                 raise RuntimeError("Printer connection changed; retry the action.")
-            status = {
-                key: dict(value) if isinstance(value, dict) else value
-                for key, value in self.status.items()
-            }
+            # Status objects are replaced by merge_status, never edited in
+            # place. Retain unchanged references through the presentation layer.
+            status = dict(self.status)
             self.settings = settings
             self.settings_refresh_needed = False
         if model.stopped(status):
@@ -593,10 +608,9 @@ class Service:
 
     def snapshot(self):
         with self.lock:
-            status = {
-                key: dict(value) if isinstance(value, dict) else value
-                for key, value in self.status.items()
-            }
+            # Unchanged objects retain identity; optimistic values below get
+            # their own presentation copies and never rewrite live status.
+            status = dict(self.status)
             settings = self.settings
             for (action, channel), (value, expiry) in list(
                 self.requested_values.items()
@@ -629,7 +643,9 @@ class Service:
                 ):
                     self.requested_values.pop((action, channel), None)
                 else:
-                    status.setdefault(obj, {})[field] = desired
+                    presented = dict(status.get(obj, {}))
+                    presented[field] = desired
+                    status[obj] = presented
             slots = []
             for key, rec in model.records(status).items():
                 # Removed spool data remains inside Klipper for the in-flight
@@ -690,6 +706,8 @@ class Service:
                 "heaters": heaters,
                 "axes": axis,
                 "materials": self.materials,
+                "resources": self.resources.descriptor,
+                "catalogue": self.catalogue.descriptor,
                 "prefs": self.current_preferences(),
                 "events": self.events,
                 "notices": self.notices,
@@ -1266,6 +1284,7 @@ class Service:
             self.gcode("CFS_LOAD_SLOT SLOT=%s CONFIRM=1" % slot)
 
     def save_slot(self, r, status, settings):
+        self.refresh_catalogue()
         slot = str(r["slot"])
         record = r["record"]
         if slot != "E" and slot not in model.slots(status):
@@ -1488,8 +1507,13 @@ class Service:
                     if eventtime < self.status_times.get(name, float("-inf")):
                         continue
                     self.status_times[name] = eventtime
+                if name == "hark_cfs_slots" and isinstance(values, dict):
+                    values = {key: value for key, value in values.items()
+                              if key not in ("library", "materials")}
                 if isinstance(values, dict) and not full:
-                    self.status.setdefault(name, {}).update(values)
+                    updated = dict(self.status.get(name, {}))
+                    updated.update(values)
+                    self.status[name] = updated
                 else:
                     self.status[name] = values
             self.connected = True
@@ -1588,7 +1612,10 @@ class Service:
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "printer.objects.subscribe",
-                        "params": {"objects": {name: None for name in OBJECTS}},
+                        "params": {"objects": {
+                            name: list(SLOT_FIELDS) if name == "hark_cfs_slots" else None
+                            for name in OBJECTS
+                        }},
                     }
                 )
                 while True:
@@ -1921,6 +1948,28 @@ class Service:
         except (OSError, ValueError):
             pass
 
+    def refresh_catalogue(self):
+        """Keep one separate catalogue file; slot changes remain live status."""
+        with self.catalogue_lock:
+            with self.lock:
+                revision = self.status.get("hark_cfs_slots", {}).get("revision")
+                key = (self.status_epoch, revision)
+                if self.catalogue_revision == key:
+                    return
+            result = self.mr.request(
+                "/printer/objects/query?hark_cfs_slots=library,materials,revision"
+            )
+            if not isinstance(result, dict):
+                return
+            data = result.get("status", {}).get("hark_cfs_slots", {})
+            if not any(name in data for name in ("library", "materials")):
+                return
+            materials = list(data.get("library", [])) + list(data.get("materials", []))
+            self.catalogue.publish(materials)
+            with self.lock:
+                self.materials = self.filaments = materials
+                self.catalogue_revision = (self.status_epoch, data.get("revision", revision))
+
     def poll(self):
         config_at = platform_at = alerts_at = full_at = 0
         while True:
@@ -1958,13 +2007,12 @@ class Service:
                         if epoch == self.status_epoch:
                             self.settings = refreshed
                             self.settings_refresh_needed = False
-                    data = self.status.get("hark_cfs_slots", {})
-                    # Library fields need an explicit full object query on
-                    # adapters which advertise a reduced subscription shape.
-                    self.materials = list(data.get("library", [])) + list(
-                        data.get("materials", [])
-                    )
-                    self.filaments = self.materials
+                    self.resources.publish({
+                        "settings": self.settings,
+                        "zones": storage.timezones(),
+                        "timezone_presets": storage.timezone_presets(),
+                        "tune_limits": model.TUNE_LIMITS,
+                    })
                     config_at = now
                     try:
                         self.platform["timelapse"] = self.mr.request(
@@ -1972,6 +2020,7 @@ class Service:
                         )
                     except Exception:
                         self.platform.pop("timelapse", None)
+                self.refresh_catalogue()
                 self.update_screen_idle()
                 self.preload_files()
                 filename = self.status.get("print_stats", {}).get("filename", "")
@@ -2059,7 +2108,7 @@ class Service:
         buffer = b""
         previous = ""
         last_warning = 0.0
-        encoder = SnapshotEncoder()
+        encoder = SnapshotEncoder(immutable_status=True)
         try:
             while True:
                 readable, _, _ = select.select([connection], [], [], 0.2)
@@ -2086,14 +2135,15 @@ class Service:
                 with self.lock:
                     lock_wait = time.monotonic() - started
                     value = self.snapshot()
+                    # These large resources are local files, not telemetry.
+                    # The renderer loads core data on revision changes and
+                    # loads the material catalogue only in the chooser.
+                    for key in ("settings", "materials", "zones", "timezone_presets", "tune_limits"):
+                        value.pop(key, None)
                     snapshot_at = time.monotonic()
-                    # These sections are replaced, never edited in place.
                     # The paired renderer receives only changed sections after
                     # the initial full state on every connection.
-                    encoded = encoder.encode(
-                        value,
-                        immutable=("settings", "materials", "zones", "timezone_presets"),
-                    )
+                    encoded = encoder.encode(value)
                 # Suppress identical snapshots. The 200 ms idle wait bounds
                 # routine traffic; incoming commands still wake select immediately.
                 encoded_at = time.monotonic()

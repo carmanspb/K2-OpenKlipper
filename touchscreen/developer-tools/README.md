@@ -23,12 +23,26 @@ Every reconnect starts with another full snapshot; queued updates are consumed
 in order. The renderer and backend are installed together as one versioned unit.
 Errors, operation state and safety availability are transmitted regardless of the visible page.
 
-`backend/snapshot_codec.py` caches section encoding. Configuration, materials and
-time-zone lists use immutable references: replace these objects when refreshing
-them rather than changing them in place. Other sections are checked against
-independent copies. The renderer compares view inputs without serializing them,
+Large static data is kept in atomic, versioned files under the installation's
+`native-screen-cache` directory:
+
+- `screen-resources.json`: printer configuration and capabilities, time-zone
+  lists and tuning limits. The renderer reads it on connection and when its
+  content revision changes.
+- `material-catalogue.json`: the printer's built-in and custom material records.
+  The renderer reads it only when the material chooser is opened. The backend
+  refreshes this file when the source catalogue revision changes; it also keeps
+  the records available for slot validation and RFID matching.
+
+The catalogue is excluded from live Moonraker queries/subscriptions and screen
+telemetry. Slot types, colours, presence and active-feed state remain live.
+`backend/snapshot_codec.py` caches the remaining section encoding. Status objects
+are immutable between updates: `merge_status()` replaces changed objects, and
+optimistic targets create presentation copies. Do not edit retained status
+objects in place. The renderer compares view inputs without serializing them,
 and updates labels only when their displayed text changes. Keep these paths
 allocation-light; do not introduce page-wide redraws for unrelated telemetry.
+Self-contained desktop fixtures still carry their own static data.
 
 `backend/storage.py:prepare_image()` uses **Pillow** to decode, crop,
 resize and cache images in a backend worker. LVGL renders the controls, text and
@@ -48,6 +62,7 @@ Paths below are relative to `touchscreen/`:
 | `src/mesh.c` | Shaded bed mesh, touch rotation, statistics and profile controls |
 | `src/view_inputs.c` | State dependencies for efficient live updates |
 | `src/json.c`, `src/screen.h` | JSON helpers, UI state and layout constants |
+| `backend/static_resources.py` | Atomic, versioned core data and material catalogue files |
 | `backend/snapshot_codec.py` | Cached initial snapshots and changed-section updates |
 | `backend/service.py` | Moonraker integration, requests, operations and thumbnails |
 | `backend/action_policy.py` | Action availability and resource ownership |
