@@ -653,16 +653,11 @@ class BedMeshCalibrate:
         toolhead = self.printer.lookup_object('toolhead')
         homed = toolhead.get_status(
             self.printer.get_reactor().monotonic())['homed_axes']
-        if not homed:
-            # Preserve the printer's full homing sequence and Z clearance.
-            self.gcode.run_script_from_command("G28")
-        else:
-            missing_xy = [axis.upper() for axis in 'xy' if axis not in homed]
-            if missing_xy:
-                self.gcode.run_script_from_command("G28 " + " ".join(missing_xy))
-            if 'z' not in homed:
-                # K2's override requires XY to be known before G28 Z.
-                self.gcode.run_script_from_command("G28 Z")
+        missing = [axis.upper() for axis in 'xyz' if axis not in homed]
+        if missing:
+            # Keep Z and missing XY in one override invocation so its Z
+            # clearance/reference happens before any XY homing motion.
+            self.gcode.run_script_from_command("G28 " + " ".join(missing))
         self.probe_mgr.start_probe(gcmd)
     def probe_finalize(self, positions):
         # Building a dense mesh holds the reactor for up to a second on the

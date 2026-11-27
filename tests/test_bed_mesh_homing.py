@@ -19,7 +19,7 @@ class MeshHoming(unittest.TestCase):
             self.calls.append(command)
             axes = command.split()[1:]
             if 'Z' in axes:
-                self.assertTrue(set('xy') <= self.homed)
+                self.assertTrue(set('xy') <= self.homed | set(''.join(axes).lower()))
             requested = set(''.join(axes).lower()) if axes else set('xyz')
             self.assertFalse(requested & self.homed)
             self.homed.update(requested)
@@ -40,8 +40,8 @@ class MeshHoming(unittest.TestCase):
         return cal
 
     def test_every_homing_state(self):
-        cases = {'': ['G28'], 'x': ['G28 Y', 'G28 Z'],
-                 'y': ['G28 X', 'G28 Z'], 'z': ['G28 X Y'],
+        cases = {'': ['G28 X Y Z'], 'x': ['G28 Y Z'],
+                 'y': ['G28 X Z'], 'z': ['G28 X Y'],
                  'xy': ['G28 Z'], 'xz': ['G28 Y'], 'yz': ['G28 X'],
                  'xyz': []}
         for homed, commands in cases.items():
