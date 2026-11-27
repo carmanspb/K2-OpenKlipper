@@ -145,9 +145,64 @@ horizontal_move_z: 5
 retries: 10
 retry_tolerance: 0.1
 """),
-    ("Z speeds: keep the K2 limits for the beta (stock Plus allows 30)",
+    ("Z velocity: stock K2 Plus",
      "max_z_velocity: 20  # stock K2\n",
-     "max_z_velocity: 20  # stock K2 Plus allows 30; K2 limit kept for the beta\n"),
+     "max_z_velocity: 30  # stock K2 Plus\n"),
+    ("Z acceleration: stock K2 Plus",
+     "max_z_accel: 500  # stock K2\n",
+     "max_z_accel: 1000  # stock K2 Plus\n"),
+    ("XY acceleration: stock K2 Plus",
+     "max_accel: 20000\n", "max_accel: 30000\n"),
+    ("Home Z: home missing XY axes before moving to the tap point",
+     """    {% if 'Z' in params and not home_all
+          and ('x' not in printer.toolhead.homed_axes
+               or 'y' not in printer.toolhead.homed_axes) %}
+        { action_raise_error("Home X and Y before requesting Z-only homing") }
+    {% endif %}
+""", """    {% set home_y = home_all or 'Y' in params or (home_z and 'y' not in printer.toolhead.homed_axes) %}
+    {% set home_x = home_all or 'X' in params or (home_z and 'x' not in printer.toolhead.homed_axes) %}
+    {% set saved_accel = printer.toolhead.max_accel %}
+"""),
+    ("Home Z: include missing Y",
+     "    {% if home_all or 'Y' in params %}\n",
+     "    {% if home_y %}\n"),
+    ("Home Z: include missing X",
+     "    {% if home_all or 'X' in params %}\n",
+     "    {% if home_x %}\n"),
+    ("Z homing travel: stock 200 mm/s at 2000 mm/s^2, probe at 500",
+     """    {% if home_z %}
+        G90
+        G1 X130 Y125 F6000
+""", """    {% if home_z %}
+        M204 S2000
+        G90
+        G1 X175 Y175 F12000
+        M204 S500
+"""),
+    ("Known Z approach: use stock Plus travel limit for the long ascent",
+     """        {% endif %}
+        G1 Z5 F600
+        M400
+        G4 P1000
+""", """        {% endif %}
+        G1 Z5 F1800
+        M400
+        G4 P1000
+"""),
+    ("Describe Plus initial Z clearance",
+     """    # Like stock, a normal G28 does not visit the PA15 bottom switch (stock
+    # keeps it for resume; KZ_ALIGN_BOTTOM is still available). With Z
+    # unknown, drop the bed 5 mm first so XY homing cannot drag the nozzle
+    # across a raised bed. If Z is already homed, just keep 5 mm clearance.
+""", """    # Reference unknown Z before XY motion. With Z already known, keep
+    # 5 mm clearance and skip the bottom switches.
+"""),
+    ("Restore acceleration after homing, including partial homes",
+     """    M204 S20000
+
+# CFS slot filament records""", """    M204 S{saved_accel}
+
+# CFS slot filament records"""),
     ("extruder PID: stock K2 Plus (its below-280C set; mainline Klipper has\n"
      "one set, Creality switches to 16.443/1.370/49.329 above 280C).\n"
      "Reviewed against a live K2 Plus by nur00's Claude, 11-02",
@@ -443,12 +498,10 @@ scrub_y_max: 356.5
     ("G28 outside a print: Z from the bottom switches (decide once)",
      """    {% set z_was_homed = 'z' in printer.toolhead.homed_axes %}
 """, """    {% set z_was_homed = 'z' in printer.toolhead.homed_axes %}
-    # K2 Plus: outside a print, homing Z first sets it from the bottom
-    # switches (KZ_ALIGN_BOTTOM), then taps from 5 mm. A Z kept from an
-    # earlier tap that fired early, or a 350 mm climb with the gauge armed,
-    # could otherwise leave Z wrong by the whole bed travel (10-31). A print
-    # already parks on the switches in START_PRINT and keeps that Z.
-    {% set z_from_bottom = home_z and printer.print_stats.state not in ("printing", "paused") %}
+    # Reference an unknown Z from the bottom switches before the short tap.
+    # Once Z is known, re-home directly without the full down/up journey.
+    # Keep the initial reference: a full-height gauge search can false-trigger.
+    {% set z_from_bottom = home_z and not z_was_homed and printer.print_stats.state not in ("printing", "paused") %}
 """),
     ("G28 outside a print: park on the bottom switches before XY homing",
      """    {% if home_z %}
@@ -485,7 +538,7 @@ variable_hot_z_comp: 0.017316
 
 # Several identical lines: replace them all, but check the count
 CHANGES_ALL = [
-    ("bed centre for the Z tap (175,175)", "G1 X130 Y125 F6000", "G1 X175 Y175 F6000", 3),
+    ("bed centre for the Z tap (175,175)", "G1 X130 Y125 F6000", "G1 X175 Y175 F6000", 2),
     ("lower the bed with BOTH Z motors (one alone tilts the bed), but not "
      "when a bottom switch says the bed is already at the bottom",
      "FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10",

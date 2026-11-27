@@ -532,6 +532,14 @@ case "$SETTINGS" in
         ;;
 esac
 
+# K2 Plus: earlier upstream installers replaced Creality's boot animation.
+# Restore their saved stock frames on upgrade; fresh installs keep stock.
+if [ "$MODEL" = F008 ] && [ -f /mnt/UDISK/mainline-backups/boot-play-stock.tar ]; then
+    rm -rf /usr/res/boot-play/part0 /usr/res/boot-play/part1
+    tar -xf /mnt/UDISK/mainline-backups/boot-play-stock.tar -C /usr/res
+    echo "    boot animation: restored stock Creality"
+fi
+
 # The native touchscreen is included by default; use the matching precompiled
 # package and preserve existing screen preferences during migration.
 if [ "${OKL_TOUCHSCREEN:-native}" = native ]; then
