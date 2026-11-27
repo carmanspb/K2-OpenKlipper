@@ -40,6 +40,8 @@ from state_updates import WakeChannel
 import platform_services as platform
 import storage
 
+cartographer_toggle = action_policy.cartographer_toggle
+
 OBJECTS = (
     "webhooks",
     "print_stats",
@@ -109,7 +111,7 @@ PRESENTATION_OBJECTS = {
     "refill": ("hark_cfs_slots",),
     "heaters": ("extruder", "heater_bed", "hark_chamber", "temperature_sensor chamber_temperature"),
     "axes": ("gcode_move",),
-    "availability": ("webhooks", "toolhead", "gcode_move", "print_stats", "k2_cfs", "filament_switch_sensor filament_sensor"),
+    "availability": ("webhooks", "toolhead", "gcode_move", "print_stats", "k2_cfs", "filament_switch_sensor filament_sensor", "idle_timeout", "k2_motor_bus"),
     "prefs": ("gcode_macro _LIGHT_IDLE", "idle_timeout", "gcode_macro _RUNOUT_REFILL"),
     "filament_activity": ("k2_cfs", "hark_cfs_slots"),
     "cfs_units": ("k2_cfs", "hark_cfs_slots"),
@@ -286,6 +288,9 @@ class WebSocket:
         self.sock.close()
 
 
+TIMER_CHOICES = {"light_off": (0, 300, 600, 1800), "idle": (0, 900, 1800, 3600, 86400)}
+
+
 class Service:
     def __init__(self, config, mr=None):
         self.config_path = Path(config)
@@ -356,6 +361,8 @@ class Service:
         self.status_epoch = 0
         self.printer_generation = 0
         self.settings_refresh_needed = True
+        self.timer_preferences_pending = True
+        self.timer_restore_token = None
         self.last_status_at = 0.0
         self.last_poll_warning = 0.0
         self.read_policy = storage.FilamentReadPolicy()
@@ -383,6 +390,61 @@ class Service:
         self.preview_retry = (None, 0.0, 0)
         self.catalogue_retry = (None, 0.0)
         self.artwork_key = None
+        self.cartographer = cartographer_toggle.Integration()
+        self.cartographer_state = {"available": False, "busy": False}
+        self.cartographer_lock = threading.Lock()
+        self.refresh_cartographer()
+
+    def refresh_cartographer(self):
+        if not self.cartographer_lock.acquire(blocking=False):
+            return
+        try:
+            with self.lock:
+                if self.cartographer_state.get("busy"):
+                    return
+            detected = self.cartographer.inspect()
+            with self.lock:
+                state = dict(detected, busy=False)
+                if self.cartographer_state.get("error"):
+                    state["error"] = self.cartographer_state["error"]
+                if state != self.cartographer_state:
+                    self.cartographer_state = state
+                    self.changed()
+        finally:
+            self.cartographer_lock.release()
+
+    def set_cartographer(self, request):
+        if request.get("confirm") is not True or type(request.get("enabled")) is not bool:
+            raise ValueError("Cartographer changes require confirmation and an on/off value")
+        desired = request["enabled"]
+        self.refresh_cartographer()
+        with self.lock:
+            if not self.cartographer_state.get("available"):
+                raise ValueError("Compatible Cartographer integration is not installed")
+            self.cartographer_state = dict(self.cartographer_state, busy=True, desired=desired, error="")
+            self.changed()
+        try:
+            status, _ = self.fresh(idle=True)
+            with self.lock:
+                other = [op for op in self.operations.values() if op.get("action") != "cartographer"]
+                reason = cartographer_toggle.blocked(status, self.connected, other)
+            if reason:
+                raise action_policy.ActionBusy(reason)
+            self.cartographer.apply(desired, self.mr.base)
+            cartographer_toggle.verify_runtime(self.mr, desired)
+            self.fresh(idle=True)
+            state = self.cartographer.inspect()
+            if not state.get("available") or state.get("enabled") is not desired or state.get("restart_pending"):
+                raise RuntimeError("Cartographer configuration could not be verified")
+            with self.lock:
+                self.cartographer_state = dict(state, busy=False)
+                self.changed()
+        except Exception as error:
+            state = self.cartographer.inspect()
+            with self.lock:
+                self.cartographer_state = dict(state, busy=False, error=str(error))
+                self.changed()
+            raise
 
     def notify_state(self, objects=None):
         """Every asynchronous UI-state writer invalidates and wakes publication."""
@@ -552,7 +614,21 @@ class Service:
             blocked = action_policy.reason(
                 request, self.status, self.connected, self.operations.values()
             )
+            if action == "cartographer" and not self.cartographer_state.get("available"):
+                blocked = "Compatible Cartographer integration is not installed"
             if blocked:
+                if action == "cartographer":
+                    # The renderer already shows pending progress after send.
+                    # A rejected request never gets a worker/completion, so
+                    # acknowledge it here instead of leaving that screen waiting.
+                    self.operation_id += 1
+                    self.result = {
+                        "id": self.operation_id, "action": action,
+                        "success": False, "rejected": True, "error": blocked,
+                    }
+                    self.results.append(self.result)
+                    self.cartographer_state = dict(self.cartographer_state, error=blocked)
+                    self.changed()
                 raise action_policy.ActionBusy(blocked)
             if action == "file":
                 self.selection_id += 1
@@ -873,6 +949,7 @@ class Service:
                     status.get("webhooks", {}).get("state_message") or "Printer stopped"
                 )
             return {
+                "cartographer": self.cartographer_state,
                 "session": self.session,
                 "printer_generation": self.printer_generation,
                 "sequence": self.sequence,
@@ -890,8 +967,8 @@ class Service:
                 "resources": self.resources.descriptor,
                 "catalogue": self.catalogue.descriptor,
                 "prefs": self.cached_presentation(
-                    "prefs", (self.prefs, self.settings.get("gcode_macro _LIGHT_IDLE"),
-                              self.settings.get("idle_timeout"), self.settings.get("gcode_macro _RUNOUT_REFILL"),
+                    "prefs", (self.prefs, model.macro_options(self.settings, "_LIGHT_IDLE"),
+                              self.settings.get("idle_timeout"), model.macro_options(self.settings, "_RUNOUT_REFILL"),
                               status.get("gcode_macro _LIGHT_IDLE"), status.get("idle_timeout"),
                               status.get("gcode_macro _RUNOUT_REFILL"),
                               self.config.get("screen", "sleep_after", fallback="600")), self.current_preferences),
@@ -944,6 +1021,9 @@ class Service:
 
     def execute(self, r):
         action = r.get("action")
+        if action == "cartographer":
+            self.set_cartographer(r)
+            return
         if action in ("restart", "firmware_restart"):
             if r.get("confirm") is not True:
                 raise ValueError("Restart requires confirmation")
@@ -1084,7 +1164,7 @@ class Service:
                 "SET_PIN PIN=chamber_led VALUE=%d" % on
                 + (
                     "\n_LIGHT_IDLE"
-                    if on and "gcode_macro _LIGHT_IDLE" in settings
+                    if on and "gcode_macro _light_idle" in {key.lower() for key in settings}
                     else ""
                 )
             )
@@ -1224,7 +1304,7 @@ class Service:
                 capability and capability not in settings
             ):
                 raise ValueError("Calibration unavailable or not confirmed")
-            if r["kind"] in {"tilt", "mesh", "shaper"} and not set("xyz") <= set(
+            if r["kind"] in {"tilt", "shaper"} and not set("xyz") <= set(
                 status.get("toolhead", {}).get("homed_axes", "")
             ):
                 command = "G28\n" + command
@@ -1604,15 +1684,14 @@ class Service:
         choices = {
             "brightness": (25, 50, 75, 100),
             "sleep_after": (0, 120, 300, 600),
-            "light_off": (0, 300, 600, 1800),
-            "idle": (0, 900, 1800, 3600, 86400),
+            **TIMER_CHOICES,
         }
         if key in choices:
             if value not in choices[key]:
                 raise ValueError("Invalid preference value")
             if key == "brightness":
                 platform.set_brightness(value)
-            elif key == "light_off" and "gcode_macro _LIGHT_IDLE" in settings:
+            elif key == "light_off" and "gcode_macro _light_idle" in {key.lower() for key in settings}:
                 self.gcode(
                     "SET_GCODE_VARIABLE MACRO=_LIGHT_IDLE VARIABLE=off_after VALUE=%d"
                     % value
@@ -1631,7 +1710,7 @@ class Service:
             if not isinstance(value, bool):
                 raise ValueError("Invalid switch value")
             if key == "cfs_auto_refill":
-                if "gcode_macro _RUNOUT_REFILL" not in settings:
+                if "gcode_macro _runout_refill" not in {key.lower() for key in settings}:
                     raise ValueError("Refill unavailable")
                 self.gcode(
                     "SET_GCODE_VARIABLE MACRO=_RUNOUT_REFILL VARIABLE=enabled VALUE=%d"
@@ -1703,6 +1782,8 @@ class Service:
                 self.status_times.clear()
                 self.status.clear()
                 if remote_reboot or reset_clock:
+                    self.timer_preferences_pending = True
+                    self.timer_restore_token = None
                     self.settings = {}
                     self.notify_state()
                 self.settings_refresh_needed = True
@@ -1735,6 +1816,9 @@ class Service:
             state_changed |= "connection_error" in self.platform
             self.platform.pop("connection_error", None)
             if self.status.get("webhooks", {}).get("state") != "ready":
+                self.timer_preferences_pending = True
+                self.timer_restore_token = None
+                self.settings_refresh_needed = True
                 self.requested_values.clear()
                 self.pending_temperatures.clear()
                 self.pending_fans.clear()
@@ -1854,6 +1938,9 @@ class Service:
         ):
             # A subscription from the previous Klipper instance must not stop
             # HTTP polling or retain the old instance's partial CFS schema.
+            self.timer_preferences_pending = True
+            self.timer_restore_token = None
+            self.settings_refresh_needed = True
             if method == "notify_klippy_ready":
                 self.printer_generation += 1
             self.stream_connected = False
@@ -1995,6 +2082,55 @@ class Service:
                 if ws:
                     ws.close()
 
+    def restore_timer_preferences(self):
+        """Restore saved timers once per Klipper startup, after fresh config."""
+        with self.lock:
+            if (
+                not self.timer_preferences_pending
+                or self.timer_restore_token is not None
+                or not self.connected
+                or self.settings_refresh_needed
+                or self.status.get("webhooks", {}).get("state") != "ready"
+                or model.active(self.status)
+                or self.operation
+            ):
+                return
+            commands = []
+            for key, choices in TIMER_CHOICES.items():
+                value = self.prefs.get(key)
+                # Settings files may be old or edited manually. Never turn an
+                # invalid saved value into a printer command.
+                if type(value) is not int or value not in choices:
+                    continue
+                if key == "light_off":
+                    if "gcode_macro _light_idle" not in {name.lower() for name in self.settings}:
+                        continue
+                    commands.extend([
+                        "SET_GCODE_VARIABLE MACRO=_LIGHT_IDLE VARIABLE=off_after VALUE=%d" % value,
+                        "_LIGHT_IDLE",
+                    ])
+                elif "idle_timeout" in self.settings:
+                    commands.append("SET_IDLE_TIMEOUT TIMEOUT=%d" % (value or 86400))
+            if not commands:
+                self.timer_preferences_pending = False
+                return
+            token = self.timer_restore_token = object()
+        # Moonraker may queue this request for a long time. Keep status merges,
+        # snapshots and action admission responsive while waiting for its reply.
+        try:
+            self.gcode("\n".join(commands))
+        except Exception:
+            with self.lock:
+                if self.timer_restore_token is token:
+                    self.timer_restore_token = None
+            raise
+        with self.lock:
+            # Restart notifications invalidate the reservation. An old response
+            # must not consume the new Klipper instance's pending restoration.
+            if self.timer_restore_token is token:
+                self.timer_restore_token = None
+                self.timer_preferences_pending = False
+
     def current_preferences(self):
         prefs = dict(self.prefs)
         # Resolve HarkScreen's auto mode for display; retain the saved preference.
@@ -2006,12 +2142,12 @@ class Service:
                 "sleep_after", self.config.get("screen", "sleep_after", fallback="600")
             )
         )
-        # Printer state is authoritative. Saved screen preferences never replay
-        # printer commands when this service starts or reconnects.
+        # Display live values. Saved timers are restored separately once Klipper
+        # is ready and idle; ordinary stream reconnects do not replay commands.
         prefs["light_off"] = int(
             self.status.get("gcode_macro _LIGHT_IDLE", {}).get(
                 "off_after",
-                self.settings.get("gcode_macro _LIGHT_IDLE", {}).get(
+                model.macro_options(self.settings, "_LIGHT_IDLE").get(
                     "variable_off_after", 0
                 ),
             )
@@ -2025,7 +2161,7 @@ class Service:
         )
         refill = self.status.get("gcode_macro _RUNOUT_REFILL", {}).get(
             "enabled",
-            self.settings.get("gcode_macro _RUNOUT_REFILL", {}).get(
+            model.macro_options(self.settings, "_RUNOUT_REFILL").get(
                 "variable_enabled", 0
             ),
         )
@@ -2560,6 +2696,7 @@ class Service:
                                 self.platform.pop("timelapse")
                                 self.notify_state()
                 self.refresh_catalogue()
+                self.restore_timer_preferences()
                 self.update_screen_idle()
                 self.preload_files()
                 self.preload_print_preview(now)
@@ -2703,7 +2840,7 @@ class Service:
                     # the initial full state on every connection.
                     encoded = encoder.encode(value, immutable=(
                         "heaters", "slots", "axes", "availability", "prefs",
-                        "filament_activity", "refill", "wifi",
+                        "filament_activity", "refill", "wifi", "cartographer",
                     ), revisions={"files": self.file_generation, "events": self.history_id})
                 # Routine events coalesce within 200 ms; quiet clients block.
                 # Commands bypass coalescing and timers retain explicit deadlines.

@@ -1,9 +1,9 @@
 """Render the generated homing macro across partial and complete homing states."""
 import importlib.util
 import itertools
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 
 import jinja2
 
@@ -14,8 +14,9 @@ generator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(generator)
 
 
-def home_commands(homed, axes, state='standby', accel=12345):
-    text = (ROOT / 'config/mainline_stage2_k2plus.cfg').read_text()
+def home_commands(homed, axes, state='standby', accel=12345,
+                  config='mainline_stage2_k2plus.cfg'):
+    text = (ROOT / 'config' / config).read_text()
     body = text.split('[homing_override]\n', 1)[1].split('\n[', 1)[0]
     body = body.split('gcode:\n', 1)[1]
     env = jinja2.Environment(block_start_string='{%', block_end_string='%}',
@@ -60,6 +61,36 @@ class K2PlusHoming(unittest.TestCase):
             self.assertFalse(any('PRTOUCH_HOME_Z' in c for c in commands))
             for axis in 'XY':
                 self.assertEqual('G28 ' + axis in commands, axis in axes)
+
+    def test_mesh_homing_preserves_clearance_and_known_axes(self):
+        for config in ('mainline_stage2.cfg', 'mainline_stage2_k2plus.cfg'):
+            for homed in ('', 'x', 'y', 'xy', 'z', 'xz', 'yz'):
+                with self.subTest(config=config, homed=homed):
+                    missing = ''.join(a.upper() for a in 'xyz' if a not in homed)
+                    commands = home_commands(homed, missing, config=config)
+                    for axis in 'XY':
+                        self.assertEqual('G28 ' + axis in commands,
+                                         axis.lower() not in homed)
+                    if 'z' not in homed:
+                        clearance = ('KZ_ALIGN_BOTTOM CONFIRM=1'
+                                     if 'k2plus' in config else
+                                     'FORCE_MOVE STEPPER=stepper_z DISTANCE=5 VELOCITY=10')
+                        self.assertIn(clearance, commands)
+                        for axis in 'XY':
+                            if axis.lower() not in homed:
+                                self.assertLess(commands.index(clearance),
+                                                commands.index('G28 ' + axis))
+                    else:
+                        self.assertNotIn('G28 Z', commands)
+                        self.assertFalse(any(c.startswith('PRTOUCH_HOME_Z')
+                                             for c in commands))
+
+    def test_k2_rejects_z_if_missing_xy_not_requested(self):
+        for homed, axes in (('', 'Z'), ('x', 'Z'), ('y', 'Z'),
+                            ('', 'XZ'), ('', 'YZ')):
+            with self.subTest(homed=homed, axes=axes), self.assertRaisesRegex(
+                    AssertionError, 'include missing XY'):
+                home_commands(homed, axes, config='mainline_stage2.cfg')
 
     def test_known_z_never_tours_bottom_in_any_print_state(self):
         for state, axes in itertools.product(('standby', 'printing', 'paused', 'complete'), ('', 'Z')):

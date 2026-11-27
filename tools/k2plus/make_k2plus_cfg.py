@@ -155,9 +155,9 @@ retry_tolerance: 0.1
      "max_accel: 20000\n", "max_accel: 30000\n"),
     ("Home Z: home missing XY axes before moving to the tap point",
      """    {% if 'Z' in params and not home_all
-          and ('x' not in printer.toolhead.homed_axes
-               or 'y' not in printer.toolhead.homed_axes) %}
-        { action_raise_error("Home X and Y before requesting Z-only homing") }
+          and (('x' not in printer.toolhead.homed_axes and 'X' not in params)
+               or ('y' not in printer.toolhead.homed_axes and 'Y' not in params)) %}
+        { action_raise_error("Home X and Y first, or include missing XY axes with Z") }
     {% endif %}
 """, """    {% set home_y = home_all or 'Y' in params or (home_z and 'y' not in printer.toolhead.homed_axes) %}
     {% set home_x = home_all or 'X' in params or (home_z and 'x' not in printer.toolhead.homed_axes) %}

@@ -650,6 +650,14 @@ class BedMeshCalibrate:
             self.update_config(gcmd)
         except BedMeshError as e:
             raise gcmd.error(str(e))
+        toolhead = self.printer.lookup_object('toolhead')
+        homed = toolhead.get_status(
+            self.printer.get_reactor().monotonic())['homed_axes']
+        missing = [axis.upper() for axis in 'xyz' if axis not in homed]
+        if missing:
+            # Keep Z and missing XY in one override invocation so its Z
+            # clearance/reference happens before any XY homing motion.
+            self.gcode.run_script_from_command("G28 " + " ".join(missing))
         self.probe_mgr.start_probe(gcmd)
     def probe_finalize(self, positions):
         # Building a dense mesh holds the reactor for up to a second on the
