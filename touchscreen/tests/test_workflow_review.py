@@ -134,7 +134,7 @@ class BackendReview(unittest.TestCase):
                 with self.subTest(kind=kind, homed_axes=axes):
                     self.state["toolhead"]["homed_axes"] = axes
                     self.run_action("calibrate", kind=kind, confirm=True)
-                    prefix = "" if axes == "xyz" else "G28\n"
+                    prefix = "G28\n" if kind != "mesh" and axes != "xyz" else ""
                     self.mr.run_gcode.assert_called_with(prefix + command)
         # An explicit Home request must still re-home known axes.
         self.state["toolhead"]["homed_axes"] = "xyz"
